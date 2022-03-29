@@ -1,0 +1,762 @@
+---
+title: "Ethiopia_2016_AndyNolan"
+author: "Andy Kim and Nolan Gunter"
+date: "today's date"
+output: pdf_document
+---
+First, read in (and install if necessary) the libraries
+
+```{r read libraries}
+library(devtools)
+library(EconomicClusters) #devtools::install_github("Lauren-Eyler/EconomicClusters")
+library(haven)
+library(weights)
+library(parallelDist) #install.packages('parallelDist')
+library(foreach)
+library(doParallel)
+library(survey)
+library(Hmisc)
+library(descr) #install.packages('descr')
+library(tidyverse)
+library(car)
+library(stats)
+```
+
+If you have Dropbox synced to your computer files, then running the following code chunk should be sufficient to read in the data. Modify if necessary.
+
+```{r read data}
+dataset <- read_dta("~/Dropbox/EconomicClusters/Ethiopia_2016/ETHR70DT/ETHR70FL.DTA")
+individual <-read_dta("~/Dropbox/EconomicClusters/Ethiopia_2016/ETIR70DT/ETIR70FL.DTA")
+```
+
+Next, we will recode the necessary variables in the data.
+
+```{r}
+dataset <- dataset %>% 
+  mutate(setting=car::recode(as.numeric(hv025),
+                          "1 = 'urban';
+                          2 = 'rural';
+                          else = NA",
+                          as.factor = TRUE,
+                          levels = c('urban', 'rural')),
+         water=car::recode(as.numeric(hv201),
+                          "11 = 'pipe_dwel';
+                          12 = 'pipe_yard'; 
+                          13 = 'pipe_neighbor'; 
+                          14 = 'pipe_public'; 
+                          c('20','21','30','31','32') = 'well';
+                          c('41', '42', '43', '51') = 'surface';
+                          c('61', '62', '71', '96') = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('pipe_dwel', 'pipe_yard', 'pipe_neighbor', 
+                                   'pipe_public', 'well', 'surface', 'other')),
+         toilet=car::recode(as.numeric(hv205),
+                          "c('10','11','12','13','14','15') = 'flush';
+                          c('20', '21', '22', '23') = 'pitlat';
+                          c('41', '42', '43', '96') = 'other';
+                          31 = 'none';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('flush', 'pitlat', 'none', 'other')),
+         cookfuel=car::recode(as.numeric(hv226),
+                          "1 = 'electricity';
+                          2 = 'LPG'; 
+                          3 = 'natural gas'; 
+                          4 = 'biogas'; 
+                          5 = 'kerosene';
+                          6 = 'coal/lignite'; 
+                          7 = 'charcoal'; 
+                          8 = 'wood'; 
+                          9 = 'straw/shrubs/grass'; 
+                          10 = 'crop';
+                          11 = 'dung'; 
+                          95 = 'nofoodcookedinhouse'; 
+                          96 = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('electricity', 'LPG', 'natural gas', 
+                                   'biogas', 'kerosene', 'coal/lignite', 'charcoal',
+                                   'wood', 'straw/shrubs/grass', 'crop', 'dung',
+                                   'nofoodcookedinhouse', 'other')),
+         floor=car::recode(as.numeric(hv213),
+                          "c('11','12') = 'natural';
+                          c('21', '22') = 'rudimentary';
+                          c('31', '32', '33', '34', '35') = 'finished';
+                          96 = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('natural', 'rudimentary', 'finished', 'other')),
+         roof=car::recode(as.numeric(hv215),
+                          "c('11','12', '13') = 'natural';
+                          c('21', '22', '23', '24') = 'rudimentary';
+                          c('31', '32', '33', '34', '35', '36') = 'finished';
+                          96 = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('natural', 'rudimentary', 'finished', 'other')),
+         wall=car::recode(as.numeric(hv214),
+                          "c('11','12', '13') = 'natural';
+                          c('21', '22', '23', '24', '25', '26') = 'rudimentary';
+                          c('31', '32', '33', '34', '35', '36') = 'finished';
+                          96 = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('natural', 'rudimentary', 'finished', 'other')),)
+```
+
+Next, we use the information from the DHS Wealth Index PCA data from: https://dhsprogram.com/topics/wealth-index/Wealth-Index-Construction.cfm
+
+For this analysis, the cutoff value we chose to subset the data was 0.05. Other cutoff points are valid.
+
+Pages 2-4 of this document detail how this PCA was run: https://dhsprogram.com/programming/wealth%20index/Steps_to_constructing_the_new_DHS_Wealth_Index.pdf
+
+```{r}
+data_full <- dataset %>% select(water, toilet, cookfuel, hv206, hv207, hv208, hv221, hv243e, hv209, sh121g, sh121h, sh121i, sh121j, sh121k, hv243b, hv243a, hv210, hv211, hv243c, hv212, hv243d, hv243d, sh122h, hv247, floor, roof, wall, hv244)
+colnames(data_full)<-c("water", "toilet", "cooking fuel", "electricity", "radio", "television", "landline", "computer", "refrigerator", "table", "chair", "bed", "electric mitad", "kerosene/pressure lamp", "watch", "cell", "bicycle", "motorcycle", "animal cart", "car", "boat with a motor", "bagag", "bank account", "floor", "roof", "wall", "agland")
+
+assets <- dataset %>% select(hv208, hv206, water, hv209, sh121j, sh121i, hv247, cookfuel, roof, hv243a, sh121g, toilet, floor, hv244)
+colnames(assets)<-c("TV", "electricity", "water", "refrigerator", "mitad", "bed", "bank", "cooking fuel", "roof", "cell", "table", "toilet", "floor", "agland")
+dejure<-dataset$hv012
+defacto<-dataset$hv013
+hhwt<-dataset$hv005
+
+data_for_EC<-EC_DHSwts(assets, dejure, defacto, hhwt)
+```
+
+[Insert description here]
+
+```{r}
+# AK: it looks like she's coding the weights for each household; if there's no hh weight data
+# she just assumes all weights to equal 1
+
+if (class(data_for_EC[,1])=="numeric"){
+  wt<-data_for_EC[,1]
+  data_for_EC<-data_for_EC[,-1]
+} else {
+  wt<-rep(1, nrow(data_for_EC))
+}
+
+col_cat<-seq_len(ncol(data_for_EC))
+
+# Create all possible combinations of 4
+combn<-utils::combn(c(1:ncol(data_for_EC)),4)
+
+col_indx=matrix(c("NULL"), ncol(combn), ncol(data_for_EC), byrow=FALSE)
+for (i in 1:ncol(combn)){
+  col_indx[i,]<-t(is.element(col_cat, combn[,i]))
+  col_indx[i,][col_indx[i,]==FALSE]<-NA
+  colnames(col_indx)=colnames(data_for_EC)
+}
+
+numCores <- detectCores()
+doParallel::registerDoParallel(cores=numCores)
+
+load("~/Dropbox/EconomicClusters/Ethiopia/Ethiopia_ASW.RData")
+#ASW_max<-max(ASW, na.rm=TRUE)
+maxASW_cluster <- which(ASW==max(ASW, na.rm=TRUE))
+
+combi<-data_for_EC[,!is.na(col_indx[maxASW_cluster,])]
+#combi_mat<-data.matrix(combi)
+
+parD<-parDist(as.matrix(combi), method = "hamming", threads = numCores) 
+wcKMR<-WeightedCluster::wcKMedRange(parD, kvals=5, weights=wt)
+```
+
+[INSERT DESCRIPTION]
+```{r}
+dataset$weights<-dataset$hv005/1000000
+dataset$cluster<- c()
+
+dataset <- dataset %>% 
+  mutate(cluster=car::recode(unlist(wcKMR$clustering),
+                          "16514 = 1;
+                          16625 = 2;
+                          16645 = 3;
+                          16097 = 4;
+                          16495 = 5"))
+
+col_cat<-seq_len(ncol(data_for_EC))
+```
+
+[Insert description]
+
+```{r}
+svydesign<-svydesign(dataset$hv001, weights=dataset$weights,  strata=dataset$hv022, data=dataset)
+
+svytable(~dataset$cluster, design=svydesign)/nrow(dataset)
+#         1          2          3          4      5
+#0.74323735 0.12083891 0.08229554 0.01962346  0.03400474 
+
+#Addis Ababa
+AddisAbaba<-dataset[which(dataset$hv024==10),]
+AddisAbaba_wt<-wt[which(dataset$hv024==10)]
+AddisAbaba_design<-subset(svydesign, dataset$hv024==10)
+svytable(~AddisAbaba$cluster, design=AddisAbaba_design)/sum(unlist(svytable(~AddisAbaba$cluster, design=AddisAbaba_design)))
+```
+
+[Insert Description]
+NOLAN: SEE BELOW AND RECODE THE FOR LOOPS
+
+```{r}
+HAZ_av<-matrix(nrow=nrow(dataset), ncol=6)
+HAZ_av[,1]<-dataset$hc70_1
+HAZ_av[,2]<-dataset$hc70_2
+HAZ_av[,3]<-dataset$hc70_3
+HAZ_av[,4]<-dataset$hc70_4
+HAZ_av[,5]<-dataset$hc70_5
+HAZ_av[,6]<-dataset$hc70_6
+for (i in 1:nrow(HAZ_av)){
+  for (j in 1:6){
+    if(is.na(HAZ_av[i,j])==TRUE | HAZ_av[i,j]==9999 | HAZ_av[i,j]==9998 | HAZ_av[i,j]==9996 | HAZ_av[i,j]==9997){
+      HAZ_av[i,j]<-NA}
+  }
+}
+
+dataset$HAZ_av<-NULL
+for (i in 1:nrow(dataset)){
+  dataset$HAZ_av[i]<-mean(HAZ_av[i,], na.rm=TRUE)
+  if(dataset$HAZ_av[i]=="NaN"){
+    dataset$HAZ_av[i]<-NA
+  }
+}
+
+dataset$HAZ_av<-dataset$HAZ_av/100
+
+summary(dataset$HAZ_av)
+#9816 NAs, so HAZ available for kids from 6834 households
+```
+
+
+
+```{r}
+dataset$weights<-dataset$hv005/1000000
+
+svydesign_HAZ<-svydesign(dataset$hv001, weights=dataset$weights,  strata=dataset$hv022, data=dataset)
+options(survey.lonely.psu="remove")
+
+
+C1<-subset(dataset, dataset$cluster==1)
+C1_design<-subset(svydesign_HAZ, dataset$cluster==1)
+C1_HAZsvy<-svymean(C1$HAZ_av, C1_design, na.rm=TRUE)
+HAZ_av_mean_C1_wtd<-mean(C1_HAZsvy)
+HAZ_sem_C1<-SE(C1_HAZsvy)
+
+C2<-subset(dataset, dataset$cluster==2)
+C2_design<-subset(svydesign_HAZ, dataset$cluster==2)
+C2_HAZsvy<-svymean(C2$HAZ_av, C2_design, na.rm=TRUE)
+HAZ_av_mean_C2_wtd<-mean(C2_HAZsvy)
+HAZ_sem_C2<-SE(C2_HAZsvy)
+
+C3<-subset(dataset, dataset$cluster==3)
+C3_design<-subset(svydesign_HAZ, dataset$cluster==3)
+C3_HAZsvy<-svymean(C3$HAZ_av, C3_design, na.rm=TRUE)
+HAZ_av_mean_C3_wtd<-mean(C3_HAZsvy)
+HAZ_sem_C3<-SE(C3_HAZsvy)
+
+C4<-subset(dataset, dataset$cluster==4)
+C4_design<-subset(svydesign_HAZ, dataset$cluster==4)
+C4_HAZsvy<-svymean(C4$HAZ_av, C4_design, na.rm=TRUE)
+HAZ_av_mean_C4_wtd<-mean(C4_HAZsvy)
+HAZ_sem_C4<-SE(C4_HAZsvy)
+
+C5<-subset(dataset, dataset$cluster==5)
+C5_design<-subset(svydesign_HAZ, dataset$cluster==5)
+C5_HAZsvy<-svymean(C5$HAZ_av, C5_design, na.rm=TRUE)
+HAZ_av_mean_C5_wtd<-mean(C5_HAZsvy)
+HAZ_sem_C5<-SE(C5_HAZsvy)
+
+HAZ_av_mean<-rbind(HAZ_av_mean_C1_wtd, HAZ_av_mean_C2_wtd, HAZ_av_mean_C3_wtd, HAZ_av_mean_C4_wtd, HAZ_av_mean_C5_wtd)
+HAZ_sem<-rbind(HAZ_sem_C1, HAZ_sem_C2, HAZ_sem_C3, HAZ_sem_C4, HAZ_sem_C5)
+
+HAZ_df<-data.frame(
+  x=c(1:5),
+  y=HAZ_av_mean,
+  sem=HAZ_sem
+)
+```
+
+NOTE: this code chunk particulary the FOR loops are very slow, way to improve efficiency?
+
+```{r}
+plot(HAZ_av_mean, xlab="Economic Groups", ylab="Average Child Height-for-Age Z-Score", main="Mean Child Height-for-Age Z-Score by Combined Economic Group", ylim=c(-1.8,0))
+with(
+  data=HAZ_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+
+merge<-merge(dataset, individual, by.x=c("hv001", "hv002"), by.y=c("v001", "v002"), all.y=FALSE)
+
+merge$hhwt<-merge$hv005/1000000
+merge$iwt<-merge$v005/1000000
+
+
+merge$child_mortality<-NULL
+merge$child_mortality<-merge$v206 + merge$v207
+for (i in 1:nrow(merge)){
+  merge$child_mortality[i]<-merge$child_mortality[i]/merge$v201[i]
+}
+
+merge$literacy<-NULL
+merge$literacy<-as.numeric(merge$v155)
+for (i in 1:nrow(merge)){
+  if (is.na(merge$v155[i])==TRUE | merge$v155[i]==3 |merge$v155[i]==4 | merge$v155[i]==9){
+    merge$literacy[i]<-NA
+  }
+}
+
+svydesign_merge<-svydesign(merge$hv021, weights=merge$iwt,  strata=merge$hv022, data=merge, nest=FALSE)
+
+CM1<-subset(merge, merge$cluster==1)
+CM1_design<-subset(svydesign_merge, merge$cluster==1)
+CM1_litsvy<-svymean(CM1$literacy, CM1_design, na.rm=TRUE)
+literacy_mean_CM1_wtd<-mean(CM1_litsvy)
+literacy_sem_CM1<-SE(CM1_litsvy)
+
+CM1_cmsvy<-svymean(CM1$child_mortality, CM1_design, na.rm=TRUE)
+childmort_mean_CM1_wtd<-mean(CM1_cmsvy)
+childmort_sem_CM1<-SE(CM1_cmsvy)
+
+CM2<-subset(merge, merge$cluster==2)
+CM2_design<-subset(svydesign_merge, merge$cluster==2)
+CM2_litsvy<-svymean(CM2$literacy, CM2_design, na.rm=TRUE)
+literacy_mean_CM2_wtd<-mean(CM2_litsvy)
+literacy_sem_CM2<-SE(CM2_litsvy)
+
+CM2_cmsvy<-svymean(CM2$child_mortality, CM2_design, na.rm=TRUE)
+childmort_mean_CM2_wtd<-mean(CM2_cmsvy)
+childmort_sem_CM2<-SE(CM2_cmsvy)
+
+CM3<-subset(merge, merge$cluster==3)
+CM3_design<-subset(svydesign_merge, merge$cluster==3)
+CM3_litsvy<-svymean(CM3$literacy, CM3_design, na.rm=TRUE)
+literacy_mean_CM3_wtd<-mean(CM3_litsvy)
+literacy_sem_CM3<-SE(CM3_litsvy)
+
+CM3_cmsvy<-svymean(CM3$child_mortality, CM3_design, na.rm=TRUE)
+childmort_mean_CM3_wtd<-mean(CM3_cmsvy)
+childmort_sem_CM3<-SE(CM3_cmsvy)
+
+CM4<-subset(merge, merge$cluster==4)
+CM4_design<-subset(svydesign_merge, merge$cluster==4)
+CM4_litsvy<-svymean(CM4$literacy, CM4_design, na.rm=TRUE)
+literacy_mean_CM4_wtd<-mean(CM4_litsvy)
+literacy_sem_CM4<-SE(CM4_litsvy)
+
+CM4_cmsvy<-svymean(CM4$child_mortality, CM4_design, na.rm=TRUE)
+childmort_mean_CM4_wtd<-mean(CM4_cmsvy)
+childmort_sem_CM4<-SE(CM4_cmsvy)
+
+CM5<-subset(merge, merge$cluster==5)
+CM5_design<-subset(svydesign_merge, merge$cluster==5)
+CM5_litsvy<-svymean(CM5$literacy, CM5_design, na.rm=TRUE)
+literacy_mean_CM5_wtd<-mean(CM5_litsvy)
+literacy_sem_CM5<-SE(CM5_litsvy)
+
+CM5_cmsvy<-svymean(CM5$child_mortality, CM5_design, na.rm=TRUE)
+childmort_mean_CM5_wtd<-mean(CM5_cmsvy)
+childmort_sem_CM5<-SE(CM5_cmsvy)
+
+
+literacy_mean<-rbind(literacy_mean_CM1_wtd, literacy_mean_CM2_wtd, literacy_mean_CM3_wtd, literacy_mean_CM4_wtd, literacy_mean_CM5_wtd)
+literacy_sem<-rbind(literacy_sem_CM1, literacy_sem_CM2, literacy_sem_CM3, literacy_sem_CM4, literacy_sem_CM5)
+
+lit_df<-data.frame(
+  x=c(1:5),
+  y=literacy_mean,
+  sem=literacy_sem
+)
+
+```
+
+```{r}
+plot(literacy_mean, xlab="Economic Groups", ylab="Average Women's Literacy Score", main="Mean Women's Literacy Score by Economic Group", ylim=c(0,2.0))
+with(
+  data=lit_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+
+childmort_mean<-rbind(childmort_mean_CM1_wtd, childmort_mean_CM2_wtd, childmort_mean_CM3_wtd, childmort_mean_CM4_wtd, childmort_mean_CM5_wtd)
+childmort_sem<-rbind(childmort_sem_CM1, childmort_sem_CM2, childmort_sem_CM3, childmort_sem_CM4, childmort_sem_CM5)
+
+cm_df<-data.frame(
+  x=c(1:5), 
+  y=childmort_mean,
+  sem=childmort_sem
+)
+
+plot(childmort_mean, xlab="Economic Groups", ylab="Average Proportion of Children Deceased", main="Child Mortality by Economic Group", ylim=c(0,0.12))
+with(
+  data=cm_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+```
+
+```{r}
+##### Wealth Index #####
+WI1<-subset(dataset, dataset$hv270==1)
+WI1_design<-subset(svydesign_HAZ, dataset$hv270==1)
+WI1_HAZsvy<-svymean(WI1$HAZ_av, WI1_design, na.rm=TRUE)
+HAZ_av_mean_WI1_wtd<-mean(WI1_HAZsvy)
+HAZ_sem_WI1<-SE(WI1_HAZsvy)
+
+WI2<-subset(dataset, dataset$hv270==2)
+WI2_design<-subset(svydesign_HAZ, dataset$hv270==2)
+WI2_HAZsvy<-svymean(WI2$HAZ_av, WI2_design, na.rm=TRUE)
+HAZ_av_mean_WI2_wtd<-mean(WI2_HAZsvy)
+HAZ_sem_WI2<-SE(WI2_HAZsvy)
+
+WI3<-subset(dataset, dataset$hv270==3)
+WI3_design<-subset(svydesign_HAZ, dataset$hv270==3)
+WI3_HAZsvy<-svymean(WI3$HAZ_av, WI3_design, na.rm=TRUE)
+HAZ_av_mean_WI3_wtd<-mean(WI3_HAZsvy)
+HAZ_sem_WI3<-SE(WI3_HAZsvy)
+
+WI4<-subset(dataset, dataset$hv270==4)
+WI4_design<-subset(svydesign_HAZ, dataset$hv270==4)
+WI4_HAZsvy<-svymean(WI4$HAZ_av, WI4_design, na.rm=TRUE)
+HAZ_av_mean_WI4_wtd<-mean(WI4_HAZsvy)
+HAZ_sem_WI4<-SE(WI4_HAZsvy)
+
+WI5<-subset(dataset, dataset$hv270==5)
+WI5_design<-subset(svydesign_HAZ, dataset$hv270==5)
+WI5_HAZsvy<-svymean(WI5$HAZ_av, WI5_design, na.rm=TRUE)
+HAZ_av_mean_WI5_wtd<-mean(WI5_HAZsvy)
+HAZ_sem_WI5<-SE(WI5_HAZsvy)
+
+HAZ_av_mean<-rbind(HAZ_av_mean_WI1_wtd, HAZ_av_mean_WI2_wtd, HAZ_av_mean_WI3_wtd, HAZ_av_mean_WI4_wtd, HAZ_av_mean_WI5_wtd)
+HAZ_sem<-rbind(HAZ_sem_WI1, HAZ_sem_WI2, HAZ_sem_WI3, HAZ_sem_WI4, HAZ_sem_WI5)
+
+HAZ_df<-data.frame(
+  x=c(1:5),
+  y=HAZ_av_mean,
+  sem=HAZ_sem
+)
+
+plot(HAZ_av_mean, xlab="Economic Groups", ylab="Average Child Height-for-Age Z-Score", main="Mean Child Height-for-Age Z-Score by Combined Economic Group", ylim=c(-1.8,0))
+with(
+  data=HAZ_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+
+
+WIM1<-subset(merge, merge$hv270==1)
+WIM1_design<-subset(svydesign_merge, merge$hv270==1)
+WIM1_litsvy<-svymean(WIM1$literacy, WIM1_design, na.rm=TRUE)
+literacy_mean_WIM1_wtd<-mean(WIM1_litsvy)
+literacy_sem_WIM1<-SE(WIM1_litsvy)
+
+WIM1_cmsvy<-svymean(WIM1$child_mortality, WIM1_design, na.rm=TRUE)
+childmort_mean_WIM1_wtd<-mean(WIM1_cmsvy)
+childmort_sem_WIM1<-SE(WIM1_cmsvy)
+
+WIM2<-subset(merge, merge$hv270==2)
+WIM2_design<-subset(svydesign_merge, merge$hv270==2)
+WIM2_litsvy<-svymean(WIM2$literacy, WIM2_design, na.rm=TRUE)
+literacy_mean_WIM2_wtd<-mean(WIM2_litsvy)
+literacy_sem_WIM2<-SE(WIM2_litsvy)
+
+WIM2_cmsvy<-svymean(WIM2$child_mortality, WIM2_design, na.rm=TRUE)
+childmort_mean_WIM2_wtd<-mean(WIM2_cmsvy)
+childmort_sem_WIM2<-SE(WIM2_cmsvy)
+
+WIM3<-subset(merge, merge$hv270==3)
+WIM3_design<-subset(svydesign_merge, merge$hv270==3)
+WIM3_litsvy<-svymean(WIM3$literacy, WIM3_design, na.rm=TRUE)
+literacy_mean_WIM3_wtd<-mean(WIM3_litsvy)
+literacy_sem_WIM3<-SE(WIM3_litsvy)
+
+WIM3_cmsvy<-svymean(WIM3$child_mortality, WIM3_design, na.rm=TRUE)
+childmort_mean_WIM3_wtd<-mean(WIM3_cmsvy)
+childmort_sem_WIM3<-SE(WIM3_cmsvy)
+
+WIM4<-subset(merge, merge$hv270==4)
+WIM4_design<-subset(svydesign_merge, merge$hv270==4)
+WIM4_litsvy<-svymean(WIM4$literacy, WIM4_design, na.rm=TRUE)
+literacy_mean_WIM4_wtd<-mean(WIM4_litsvy)
+literacy_sem_WIM4<-SE(WIM4_litsvy)
+
+WIM4_cmsvy<-svymean(WIM4$child_mortality, WIM4_design, na.rm=TRUE)
+childmort_mean_WIM4_wtd<-mean(WIM4_cmsvy)
+childmort_sem_WIM4<-SE(WIM4_cmsvy)
+
+WIM5<-subset(merge, merge$hv270==5)
+WIM5_design<-subset(svydesign_merge, merge$hv270==5)
+WIM5_litsvy<-svymean(WIM5$literacy, WIM5_design, na.rm=TRUE)
+literacy_mean_WIM5_wtd<-mean(WIM5_litsvy)
+literacy_sem_WIM5<-SE(WIM5_litsvy)
+
+WIM5_cmsvy<-svymean(WIM5$child_mortality, WIM5_design, na.rm=TRUE)
+childmort_mean_WIM5_wtd<-mean(WIM5_cmsvy)
+childmort_sem_WIM5<-SE(WIM5_cmsvy)
+
+literacy_mean<-rbind(literacy_mean_WIM1_wtd, literacy_mean_WIM2_wtd, literacy_mean_WIM3_wtd, literacy_mean_WIM4_wtd, literacy_mean_WIM5_wtd)
+literacy_sem<-rbind(literacy_sem_WIM1, literacy_sem_WIM2, literacy_sem_WIM3, literacy_sem_WIM4, literacy_sem_WIM5)
+
+lit_df<-data.frame(
+  x=c(1:5),
+  y=literacy_mean,
+  sem=literacy_sem
+)
+
+plot(literacy_mean, xlab="Economic Groups", ylab="Average Women's Literacy Score", main="Mean Women's Literacy Score by Economic Group", ylim=c(0,2.0))
+with(
+  data=lit_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+```
+
+NOLAN: SEE BELOW AND RECODE FOR LOOP
+
+```{r}
+childmort_mean<-rbind(childmort_mean_WIM1_wtd, childmort_mean_WIM2_wtd, childmort_mean_WIM3_wtd, childmort_mean_WIM4_wtd, childmort_mean_WIM5_wtd)
+childmort_sem<-rbind(childmort_sem_WIM1, childmort_sem_WIM2, childmort_sem_WIM3, childmort_sem_WIM4, childmort_sem_WIM5)
+
+cm_df<-data.frame(
+  x=c(1:5),
+  y=childmort_mean,
+  sem=childmort_sem
+)
+
+plot(childmort_mean, xlab="Economic Groups", ylab="Average Proportion of Children Deceased", main="Child Mortality by Economic Group", ylim=c(0,0.12))
+with(
+  data=cm_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+
+#View(table(dataset$hv106_01))
+dataset$edlevel<-c()
+
+dataset <- dataset %>% 
+  mutate(edlevel=car::recode(dataset$hv106_01,
+                          "0 = 1;
+                          1 = 2;
+                          2 = 3;
+                          3 = 4;
+                          8 = 5",
+                          as.factor=TRUE,
+                          levels=c('1', '2', '3', '4','5')))
+
+Ed_bycluster<-crosstab(dataset$edlevel, dataset$cluster, weight=wt)
+Ed_byWI<-crosstab(dataset$edlevel, dataset$hv270, weight=wt)
+```
+
+NOLAN: SEE BELOW AND RECODE FOR LOOP
+
+```{r}
+#let's see how dividing ethiopia further looks...
+test<-cbind(dataset$toilet, dataset$hv206, dataset$hv208, dataset$sh121j)
+colnames(test)<-c("toilet", "electricity", "TV", "electric mitad")
+test_mat<-data.matrix(test)
+
+parD_test<-parDist(test_mat, method =  "hamming") 
+wcKMR_test<-WeightedCluster::wcKMedRange(parD_test, kvals=(5), weights=wt)
+ASW_test<-wcKMR_test$stats[,5]
+
+Medoids_test<-c(unique(wcKMR_test$clustering))
+Medoid_df_test<-rbind(test[as.numeric(unlist(Medoids_test)), ])
+
+dataset$weights<-dataset$hv005/1000000
+dataset$cluster_test<-c()
+
+dataset <- dataset %>% 
+  mutate(cluster_test=car::recode(unlist(wcKMR$clustering),
+                          "15710 = 1;
+                          16511 = 2;
+                          16650 = 3;
+                          16097 = 4;
+                          16495 = 5",
+                          as.factor=TRUE,
+                          levels=c('1', '2', '3', '4','5')))
+
+
+```
+
+```{r}
+svydesign<-svydesign(dataset$hv001, weights=dataset$weights,  strata=dataset$hv022, data=dataset)
+
+svytable(~dataset$cluster_test, design=svydesign)/nrow(dataset)
+#1          2          3          4          5 
+#0.31879990 0.44332684 0.10222362 0.08229554 0.05335408 
+C1_test<-subset(dataset, dataset$cluster_test==1)
+C1_test_design<-subset(svydesign_HAZ, dataset$cluster_test==1)
+C1_test_HAZsvy<-svymean(C1_test$HAZ_av, C1_test_design, na.rm=TRUE)
+HAZ_av_mean_C1_test_wtd<-mean(C1_test_HAZsvy)
+HAZ_sem_C1_test<-SE(C1_test_HAZsvy)
+
+C2_test<-subset(dataset, dataset$cluster_test==2)
+C2_test_design<-subset(svydesign_HAZ, dataset$cluster_test==2)
+C2_test_HAZsvy<-svymean(C2_test$HAZ_av, C2_test_design, na.rm=TRUE)
+HAZ_av_mean_C2_test_wtd<-mean(C2_test_HAZsvy)
+HAZ_sem_C2_test<-SE(C2_test_HAZsvy)
+
+C3_test<-subset(dataset, dataset$cluster_test==3)
+C3_test_design<-subset(svydesign_HAZ, dataset$cluster_test==3)
+C3_test_HAZsvy<-svymean(C3_test$HAZ_av, C3_test_design, na.rm=TRUE)
+HAZ_av_mean_C3_test_wtd<-mean(C3_test_HAZsvy)
+HAZ_sem_C3_test<-SE(C3_test_HAZsvy)
+
+C4_test<-subset(dataset, dataset$cluster_test==4)
+C4_test_design<-subset(svydesign_HAZ, dataset$cluster_test==4)
+C4_test_HAZsvy<-svymean(C4_test$HAZ_av, C4_test_design, na.rm=TRUE)
+HAZ_av_mean_C4_test_wtd<-mean(C4_test_HAZsvy)
+HAZ_sem_C4_test<-SE(C4_test_HAZsvy)
+
+C5_test<-subset(dataset, dataset$cluster_test==5)
+C5_test_design<-subset(svydesign_HAZ, dataset$cluster_test==5)
+C5_test_HAZsvy<-svymean(C5_test$HAZ_av, C5_test_design, na.rm=TRUE)
+HAZ_av_mean_C5_test_wtd<-mean(C5_test_HAZsvy)
+HAZ_sem_C5_test<-SE(C5_test_HAZsvy)
+
+HAZ_av_mean<-rbind(HAZ_av_mean_C1_test_wtd, HAZ_av_mean_C2_test_wtd, HAZ_av_mean_C3_test_wtd, HAZ_av_mean_C4_test_wtd, HAZ_av_mean_C5_test_wtd)
+HAZ_sem<-rbind(HAZ_sem_C1_test, HAZ_sem_C2_test, HAZ_sem_C3_test, HAZ_sem_C4_test, HAZ_sem_C5_test)
+
+HAZ_df<-data.frame(
+  x=c(1:5),
+  y=HAZ_av_mean,
+  sem=HAZ_sem
+)
+
+plot(HAZ_av_mean, xlab="Economic Groups", ylab="Average Child Height-for-Age Z-Score", main="Mean Child Height-for-Age Z-Score by Combined Economic Group", ylim=c(-1.8,0))
+with(
+  data=HAZ_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+
+merge<-merge(dataset, individual, by.x=c("hv001", "hv002"), by.y=c("v001", "v002"), all.y=FALSE)
+
+merge$hhwt<-merge$hv005/1000000
+merge$iwt<-merge$v005/1000000
+
+
+merge$child_mortality<-NULL
+merge$child_mortality<-merge$v206 + merge$v207
+for (i in 1:nrow(merge)){
+  merge$child_mortality[i]<-merge$child_mortality[i]/merge$v201[i]
+}
+
+merge$literacy<-NULL
+merge$literacy<-as.numeric(merge$v155)
+for (i in 1:nrow(merge)){
+  if (is.na(merge$v155[i])==TRUE | merge$v155[i]==3 |merge$v155[i]==4 | merge$v155[i]==9){
+    merge$literacy[i]<-NA
+  }
+}
+
+svydesign_merge<-svydesign(merge$hv021, weights=merge$iwt,  strata=merge$hv022, data=merge, nest=FALSE)
+
+
+CM1_test<-subset(merge, merge$cluster_test==1)
+CM1_test_design<-subset(svydesign_merge, merge$cluster_test==1)
+CM1_test_litsvy<-svymean(CM1_test$literacy, CM1_test_design, na.rm=TRUE)
+literacy_mean_CM1_test_wtd<-mean(CM1_test_litsvy)
+literacy_sem_CM1_test<-SE(CM1_test_litsvy)
+
+CM1_test_cmsvy<-svymean(CM1_test$child_mortality, CM1_test_design, na.rm=TRUE)
+childmort_mean_CM1_test_wtd<-mean(CM1_test_cmsvy)
+childmort_sem_CM1_test<-SE(CM1_test_cmsvy)
+
+CM2_test<-subset(merge, merge$cluster_test==2)
+CM2_test_design<-subset(svydesign_merge, merge$cluster_test==2)
+CM2_test_litsvy<-svymean(CM2_test$literacy, CM2_test_design, na.rm=TRUE)
+literacy_mean_CM2_test_wtd<-mean(CM2_test_litsvy)
+literacy_sem_CM2_test<-SE(CM2_test_litsvy)
+
+CM2_test_cmsvy<-svymean(CM2_test$child_mortality, CM2_test_design, na.rm=TRUE)
+childmort_mean_CM2_test_wtd<-mean(CM2_test_cmsvy)
+childmort_sem_CM2_test<-SE(CM2_test_cmsvy)
+
+CM3_test<-subset(merge, merge$cluster_test==3)
+CM3_test_design<-subset(svydesign_merge, merge$cluster_test==3)
+CM3_test_litsvy<-svymean(CM3_test$literacy, CM3_test_design, na.rm=TRUE)
+literacy_mean_CM3_test_wtd<-mean(CM3_test_litsvy)
+literacy_sem_CM3_test<-SE(CM3_test_litsvy)
+
+CM3_test_cmsvy<-svymean(CM3_test$child_mortality, CM3_test_design, na.rm=TRUE)
+childmort_mean_CM3_test_wtd<-mean(CM3_test_cmsvy)
+childmort_sem_CM3_test<-SE(CM3_test_cmsvy)
+
+CM4_test<-subset(merge, merge$cluster_test==4)
+CM4_test_design<-subset(svydesign_merge, merge$cluster_test==4)
+CM4_test_litsvy<-svymean(CM4_test$literacy, CM4_test_design, na.rm=TRUE)
+literacy_mean_CM4_test_wtd<-mean(CM4_test_litsvy)
+literacy_sem_CM4_test<-SE(CM4_test_litsvy)
+
+CM4_test_cmsvy<-svymean(CM4_test$child_mortality, CM4_test_design, na.rm=TRUE)
+childmort_mean_CM4_test_wtd<-mean(CM4_test_cmsvy)
+childmort_sem_CM4_test<-SE(CM4_test_cmsvy)
+
+CM5_test<-subset(merge, merge$cluster_test==5)
+CM5_test_design<-subset(svydesign_merge, merge$cluster_test==5)
+CM5_test_litsvy<-svymean(CM5_test$literacy, CM5_test_design, na.rm=TRUE)
+literacy_mean_CM5_test_wtd<-mean(CM5_test_litsvy)
+literacy_sem_CM5_test<-SE(CM5_test_litsvy)
+
+CM5_test_cmsvy<-svymean(CM5_test$child_mortality, CM5_test_design, na.rm=TRUE)
+childmort_mean_CM5_test_wtd<-mean(CM5_test_cmsvy)
+childmort_sem_CM5_test<-SE(CM5_test_cmsvy)
+
+literacy_mean<-rbind(literacy_mean_CM1_test_wtd, literacy_mean_CM2_test_wtd, literacy_mean_CM3_test_wtd, literacy_mean_CM4_test_wtd, literacy_mean_CM5_test_wtd)
+literacy_sem<-rbind(literacy_sem_CM1_test, literacy_sem_CM2_test, literacy_sem_CM3_test, literacy_sem_CM4_test, literacy_sem_CM5_test)
+
+lit_df<-data.frame(
+  x=c(1:5),
+  y=literacy_mean,
+  sem=literacy_sem
+)
+
+plot(literacy_mean, xlab="Economic Groups", ylab="Average Women's Literacy Score", main="Mean Women's Literacy Score by Economic Group", ylim=c(0,2.0))
+with(
+  data=lit_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+```
+
+```{r}
+childmort_mean<-rbind(childmort_mean_CM1_test_wtd, childmort_mean_CM2_test_wtd, childmort_mean_CM3_test_wtd, childmort_mean_CM4_test_wtd, childmort_mean_CM5_test_wtd)
+childmort_sem<-rbind(childmort_sem_CM1_test, childmort_sem_CM2_test, childmort_sem_CM3_test, childmort_sem_CM4_test, childmort_sem_CM5_test)
+
+cm_df<-data.frame(
+  x=c(1:5),
+  y=childmort_mean,
+  sem=childmort_sem
+)
+
+plot(childmort_mean, xlab="Economic Groups", ylab="Average Proportion of Children Deceased", main="Child Mortality by Economic Group", ylim=c(0,0.12))
+with(
+  data=cm_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+```
+
+
+```{r}
+### ANDY CHUNK
+col_cat<-seq_len(ncol(data_for_EC))
+
+# Create all possible combinations of 4
+combn<-utils::combn(c(1:ncol(data_for_EC)),4)
+
+col_indx=matrix(c("NULL"), ncol(combn), ncol(data_for_EC), byrow=FALSE)
+for (i in 1:ncol(combn)){
+  col_indx[i,]<-t(is.element(col_cat, combn[,i]))
+  col_indx[i,][col_indx[i,]==FALSE]<-NA
+  colnames(col_indx)=colnames(data_for_EC)
+}
+
+numCores <- detectCores()
+doParallel::registerDoParallel(cores=numCores)
+
+load("~/Dropbox/EconomicClusters/Ethiopia/Ethiopia_ASW.RData")
+#ASW_max<-max(ASW, na.rm=TRUE)
+maxASW_cluster <- which(ASW==max(ASW, na.rm=TRUE))
+
+combi<-data_for_EC[,!is.na(col_indx[maxASW_cluster,])]
+#combi_mat<-data.matrix(combi)
+
+parD<-parDist(as.matrix(combi), method = "hamming", threads = numCores) 
+wcKMR<-WeightedCluster::wcKMedRange(parD, kvals=5, weights=wt)
+```
+
+
+

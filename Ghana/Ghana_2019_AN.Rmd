@@ -1,0 +1,308 @@
+---
+title: "Ghana_2019_AndyNolan"
+author: "Andy Kim and Nolan Gunter"
+date: "today's date"
+output: pdf_document
+---
+
+First, read in (and install if necessary) the libraries
+
+```{r read libraries}
+library(devtools)
+library(EconomicClusters) #devtools::install_github("Lauren-Eyler/EconomicClusters")
+library(haven)
+library(weights)
+library(parallelDist) #install.packages('parallelDist')
+library(foreach)
+library(doParallel)
+library(survey)
+library(Hmisc)
+library(descr) #install.packages('descr')
+library(tidyverse)
+library(car)
+library(stats)
+```
+
+If you have Dropbox synced to your computer files, then running the following code chunk should be sufficient to read in the data. Modify if necessary.
+
+```{r read data}
+dataset <- read_dta("~/Dropbox/EconomicClusters/andy&nolan/Ghana/GHHR82DT/GHHR82FL.DTA")
+#individual <-read_dta("~/Dropbox/EconomicClusters/Ethiopia_2016/ETIR70DT/ETIR70FL.DTA")
+```
+
+Next, we use the information from the DHS Wealth Index PCA data from: https://dhsprogram.com/topics/wealth-index/Wealth-Index-Construction.cfm
+
+For this analysis, the cutoff value we chose to subset the data was 0.05. Other cutoff points are valid.
+
+Pages 2-4 of this document detail how this PCA was run: https://dhsprogram.com/programming/wealth%20index/Steps_to_constructing_the_new_DHS_Wealth_Index.pdf
+
+```{r}
+pca <- readxl::read_xlsx("~/Dropbox/EconomicClusters/andy&nolan/Ghana/ghana 2019 pca.xlsx")
+imp_pca <- pca %>% filter(PCA >= 0.03)
+```
+
+```{r}
+dataset <- dataset %>% 
+  mutate(setting=car::recode(as.numeric(hv025),
+                          "1 = 'urban';
+                          2 = 'rural';
+                          else = NA",
+                          as.factor = TRUE,
+                          levels = c('urban', 'rural')),
+         water=car::recode(as.numeric(hv201),
+                          "11 = 'pipe_dwel';
+                          12 = 'pipe_yard'; 
+                          13 = 'pipe_neighbor'; 
+                          14 = 'pipe_public'; 
+                          c('20','21','30','31','32') = 'well';
+                          c('41', '42', '43', '51') = 'surface';
+                          c('61', '62', '71', '96') = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('pipe_dwel', 'pipe_yard', 'pipe_neighbor', 
+                                   'pipe_public', 'well', 'surface', 'other')),
+         toilet=car::recode(as.numeric(hv205),
+                          "c('10','11','12','13','14','15') = 'flush';
+                          c('20', '21', '22', '23') = 'pitlat';
+                          c('41', '42', '43', '96') = 'other';
+                          31 = 'none';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('flush', 'pitlat', 'none', 'other')),
+         cookfuel=car::recode(as.numeric(hv226),
+                          "1 = 'electricity';
+                          2 = 'LPG'; 
+                          3 = 'natural gas'; 
+                          4 = 'biogas'; 
+                          5 = 'kerosene';
+                          6 = 'coal/lignite'; 
+                          7 = 'charcoal'; 
+                          8 = 'wood'; 
+                          9 = 'straw/shrubs/grass'; 
+                          10 = 'crop';
+                          11 = 'dung'; 
+                          95 = 'nofoodcookedinhouse'; 
+                          96 = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('electricity', 'LPG', 'natural gas', 
+                                   'biogas', 'kerosene', 'coal/lignite', 'charcoal',
+                                   'wood', 'straw/shrubs/grass', 'crop', 'dung',
+                                   'nofoodcookedinhouse', 'other')),
+         floor=car::recode(as.numeric(hv213),
+                          "c('11','12') = 'natural';
+                          c('21', '22') = 'rudimentary';
+                          c('31', '32', '33', '34', '35') = 'finished';
+                          96 = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('natural', 'rudimentary', 'finished', 'other')),
+         roof=car::recode(as.numeric(hv215),
+                          "c('11','12', '13') = 'natural';
+                          c('21', '22', '23', '24') = 'rudimentary';
+                          c('31', '32', '33', '34', '35', '36') = 'finished';
+                          96 = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('natural', 'rudimentary', 'finished', 'other')),
+         wall=car::recode(as.numeric(hv214),
+                          "c('11','12', '13') = 'natural';
+                          c('21', '22', '23', '24', '25', '26') = 'rudimentary';
+                          c('31', '32', '33', '34', '35', '36') = 'finished';
+                          96 = 'other';
+                          else = NA",
+                          as.factor=TRUE,
+                          levels=c('natural', 'rudimentary', 'finished', 'other')),)
+```
+
+
+```{r}
+data_full <- dataset %>% select(water, toilet, cookfuel, hv206, hv207, hv208, hv209, hv212, hv213, hv214, hv243a, hv243b, hv243e, hv247, sh114g, sh114i, sh114k, sh114m, sh114n, sh114o, sh114p)
+
+colnames(data_full)<-c("water", "toilet", "cooking fuel", "electricity", "radio", "television","refrigerator", "cartruck", "floor", "wall", "cell", "watch", "computer", "bankaccount", "freezer", "washingmachine", "dvd", "bed", "table", "chair", "cabinet")
+                       
+## how exactly should we define an asset? For this example, it seems that all of the important variables ARE assets. 
+
+assets <- dataset %>% select(water, toilet, cookfuel, hv206, hv207, hv208, hv209, hv212, hv213, hv214, hv243a, hv243b, hv243e, hv247, sh114g, sh114i, sh114k, sh114m, sh114n, sh114o, sh114p)
+
+colnames(assets)<-c("water", "toilet", "cooking fuel", "electricity", "radio", "television","refrigerator", "cartruck", "floor", "wall", "cell", "watch", "computer", "bankaccount", "freezer", "washingmachine", "dvd", "bed", "table", "chair", "cabinet")
+
+#assets <- dataset %>% select(hv208, hv206, water, hv209, sh121j, sh121i, hv247, cookfuel, roof, hv243a, sh121g, toilet, floor, hv244)
+
+#colnames(assets)<-c("TV", "electricity", "water", "refrigerator", "mitad", "bed", "bank", "cooking fuel", "roof", "cell", "table", "toilet", "floor", "agland")
+dejure<-dataset$hv012
+defacto<-dataset$hv013
+hhwt<-dataset$hv005
+
+data_for_EC<-EC_DHSwts(assets, dejure, defacto, hhwt)
+```
+
+```{r}
+numCores <- detectCores()
+doParallel::registerDoParallel(cores=numCores)
+
+if (class(data_for_EC[,1])=="numeric"){
+  wt<-data_for_EC[,1]
+  data_for_EC<-data_for_EC[,-1]
+} else {
+  wt<-rep(1, nrow(data_for_EC))
+}
+
+col_cat<-seq_len(ncol(data_for_EC))
+
+# Create all possible combinations of 4
+combn<-utils::combn(c(1:ncol(data_for_EC)),4)
+
+col_indx=matrix(c("NULL"), ncol(combn), ncol(data_for_EC), byrow=FALSE)
+for (i in 1:ncol(combn)){
+  col_indx[i,]<-t(is.element(col_cat, combn[,i]))
+  col_indx[i,][col_indx[i,]==FALSE]<-NA
+  colnames(col_indx)=colnames(data_for_EC)
+}
+
+ASW<-vector()
+combi<-list()
+parD<-list()
+wcKMR<-list()
+start.time<-Sys.time()
+# switch to i=1:nrow(col_indx) when you're ready
+ASW<-foreach::foreach (i=1:nrow(col_indx), .combine='c')  %dopar% {
+  combi<-data_for_EC[,!is.na(col_indx[i,])]
+  combi_mat<-data.matrix(combi)
+  print(names(combi))
+  parD<-parDist(combi_mat, method =  "hamming") 
+  wcKMR<-WeightedCluster::wcKMedRange(parD, kvals=(5), weights=wt)
+  ASW[i]<-wcKMR$stats[,5]
+  rm(combi)
+  rm(parD)
+  rm(wcKMR)
+  return(ASW[i])
+}
+end.time<-Sys.time()
+total<-end.time-start.time
+
+ASW_max<-max(ASW, na.rm=TRUE)
+ASW_maxind <- which(ASW==ASW_max)
+
+combi_maxASW<- data.matrix(data_for_EC[,!is.na(col_indx[ASW_maxind,])])
+
+parD<-parDist(combi_maxASW, method = "hamming", threads = numCores) 
+wcKMR<-WeightedCluster::wcKMedRange(parD, kvals=5, weights=wt)
+```
+
+The cluster with the largest ASW is: car/truck, cell, computer, and washing machine. 
+
+```{r}
+#hv005 = household sample weight
+dataset$weights<-dataset$hv005/1000000
+dataset$cluster<- c()
+
+dataset <- dataset %>% 
+  mutate(cluster=car::recode(unlist(wcKMR$clustering),
+                          "16514 = 1;
+                          16625 = 2;
+                          16645 = 3;
+                          16097 = 4;
+                          16495 = 5"))
+
+col_cat<-seq_len(ncol(data_for_EC))
+```
+
+```{r}
+svydesign<-svydesign(dataset$hv001, weights=dataset$weights,  strata=dataset$hv022, data=dataset)
+
+svytable(~dataset$cluster, design=svydesign)/nrow(dataset)
+#         1          2          3          4      5
+#0.11897460 0.03899174 0.07539326 0.04932219  0.71731821
+```
+
+```{r}
+HAZ_av<-matrix(nrow=nrow(dataset), ncol=6)
+
+## why are we doing hc70_1?
+## need to understand this better??
+
+HAZ_av[,1]<-dataset$hc70_1
+HAZ_av[,2]<-dataset$hc70_2
+HAZ_av[,3]<-dataset$hc70_3
+HAZ_av[,4]<-dataset$hc70_4
+HAZ_av[,5]<-dataset$hc70_5
+HAZ_av[,6]<-dataset$hc70_6
+for (i in 1:nrow(HAZ_av)){
+  for (j in 1:6){
+    if(is.na(HAZ_av[i,j])==TRUE | HAZ_av[i,j]==9999 | HAZ_av[i,j]==9998 | HAZ_av[i,j]==9996 | HAZ_av[i,j]==9997){
+      HAZ_av[i,j]<-NA}
+  }
+}
+
+dataset$HAZ_av<-NULL
+for (i in 1:nrow(dataset)){
+  dataset$HAZ_av[i]<-mean(HAZ_av[i,], na.rm=TRUE)
+  if(dataset$HAZ_av[i]=="NaN"){
+    dataset$HAZ_av[i]<-NA
+  }
+}
+
+dataset$HAZ_av<-dataset$HAZ_av/100
+
+summary(dataset$HAZ_av)
+#9816 NAs, so HAZ available for kids from 6834 households
+```
+
+```{r}
+dataset$weights<-dataset$hv005/1000000
+
+svydesign_HAZ<-svydesign(dataset$hv001, weights=dataset$weights,  strata=dataset$hv022, data=dataset)
+options(survey.lonely.psu="remove")
+
+
+C1<-subset(dataset, dataset$cluster==1)
+C1_design<-subset(svydesign_HAZ, dataset$cluster==1)
+C1_HAZsvy<-svymean(C1$HAZ_av, C1_design, na.rm=TRUE)
+HAZ_av_mean_C1_wtd<-mean(C1_HAZsvy)
+HAZ_sem_C1<-SE(C1_HAZsvy)
+
+C2<-subset(dataset, dataset$cluster==2)
+C2_design<-subset(svydesign_HAZ, dataset$cluster==2)
+C2_HAZsvy<-svymean(C2$HAZ_av, C2_design, na.rm=TRUE)
+HAZ_av_mean_C2_wtd<-mean(C2_HAZsvy)
+HAZ_sem_C2<-SE(C2_HAZsvy)
+
+C3<-subset(dataset, dataset$cluster==3)
+C3_design<-subset(svydesign_HAZ, dataset$cluster==3)
+C3_HAZsvy<-svymean(C3$HAZ_av, C3_design, na.rm=TRUE)
+HAZ_av_mean_C3_wtd<-mean(C3_HAZsvy)
+HAZ_sem_C3<-SE(C3_HAZsvy)
+
+C4<-subset(dataset, dataset$cluster==4)
+C4_design<-subset(svydesign_HAZ, dataset$cluster==4)
+C4_HAZsvy<-svymean(C4$HAZ_av, C4_design, na.rm=TRUE)
+HAZ_av_mean_C4_wtd<-mean(C4_HAZsvy)
+HAZ_sem_C4<-SE(C4_HAZsvy)
+
+C5<-subset(dataset, dataset$cluster==5)
+C5_design<-subset(svydesign_HAZ, dataset$cluster==5)
+C5_HAZsvy<-svymean(C5$HAZ_av, C5_design, na.rm=TRUE)
+HAZ_av_mean_C5_wtd<-mean(C5_HAZsvy)
+HAZ_sem_C5<-SE(C5_HAZsvy)
+
+HAZ_av_mean<-rbind(HAZ_av_mean_C1_wtd, HAZ_av_mean_C2_wtd, HAZ_av_mean_C3_wtd, HAZ_av_mean_C4_wtd, HAZ_av_mean_C5_wtd)
+HAZ_sem<-rbind(HAZ_sem_C1, HAZ_sem_C2, HAZ_sem_C3, HAZ_sem_C4, HAZ_sem_C5)
+
+HAZ_df<-data.frame(
+  x=c(1:5),
+  y=HAZ_av_mean,
+  sem=HAZ_sem
+)
+```
+
+NOTE: this code chunk particulary the FOR loops are very slow, way to improve efficiency?
+
+```{r}
+plot(HAZ_av_mean, xlab="Economic Groups", ylab="Average Child Height-for-Age Z-Score", main="Mean Child Height-for-Age Z-Score by Combined Economic Group", ylim=c(-1.8,0))
+with(
+  data=HAZ_df,
+  expr= errbar(x, y, y+sem, y-sem, add=T, pch=1, cap=0.015)
+)
+```
+
